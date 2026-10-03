@@ -8,7 +8,7 @@ point stays loaded).
 """
 import json, sys, subprocess, time, urllib.request, shlex, shutil, pathlib
 
-AB = pathlib.Path("/home/jim/strata-ab")
+AB = pathlib.Path(__file__).resolve().parent
 VENV = pathlib.Path("/home/jim/Strata/variant.env")
 
 def running_port():

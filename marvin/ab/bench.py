@@ -11,12 +11,12 @@ import json, sys, time, uuid, glob, statistics, argparse, urllib.request, pathli
 
 URL = "http://127.0.0.1:8033/v1/chat/completions"
 MODEL = "Strata-IQ3XXS"
-OUT = pathlib.Path("/home/jim/strata-ab/results")
+OUT = pathlib.Path(__file__).resolve().parent / "results"
 
 def corpus():
     parts = []
-    for pat in ["/home/jim/strata-ab/official/src/**/*.cpp", "/home/jim/strata-ab/official/src/**/*.cu",
-                "/home/jim/strata-ab/official/docs/*.md", "/home/jim/strata-ab/official/serve/*.py"]:
+    for pat in ["/home/jim/Strata/src/**/*.cpp", "/home/jim/Strata/src/**/*.cu",
+                "/home/jim/Strata/docs/*.md", "/home/jim/Strata/serve/*.py"]:
         for f in sorted(glob.glob(pat, recursive=True)):
             parts.append(f"\n\n===== {f} =====\n" + pathlib.Path(f).read_text(errors="ignore"))
     return "".join(parts)

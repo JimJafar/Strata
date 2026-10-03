@@ -61,7 +61,7 @@ Things that did not help:
 - A 16K prompt chunk with the resident tier: 16K, 32K and agent prompts were about 20% slower (100K was 3% faster).
 - A VRAM reserve of 350 MiB instead of 700: the verify buffers no longer fit, so the engine failed to start.
 
-Raw results and the harness are in `~/strata-ab` (`bench.py`, `sweep.py`, `results/`).
+Raw results and the harness are in `marvin/ab` (`bench.py`, `sweep.py`, `results/`). The benchmark prompts are built from the upstream 0.1.37 source in `~/Strata`, so keep that checkout at the same version when comparing new runs with these.
 
 ## IQ3_S on the fork (`strata-iq3_s-marvin.json`)
 
