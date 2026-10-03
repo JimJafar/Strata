@@ -457,7 +457,14 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
 }
 
 void FileExpertSource::close() {
-    if (complement_arena_ != nullptr) {
+    if (complement_arena_ != nullptr && complement_thp_base_ != nullptr) {
+#if !defined(_WIN32)
+        (void) cudaHostUnregister(complement_arena_);
+        (void) munmap(complement_thp_base_, complement_thp_len_);
+#endif
+        complement_thp_base_ = nullptr;
+        complement_thp_len_ = 0;
+    } else if (complement_arena_ != nullptr) {
         if (complement_pinned_ && !complement_partial_) (void) cudaFreeHost(complement_arena_);
         else {
             if (complement_partial_) (void) cudaHostUnregister(complement_arena_);
@@ -1142,8 +1149,19 @@ bool FileExpertSource::pin_cache_complement(
     uint64_t partial_pin = 0;   ///< CS-T: a registered prefix of a locked arena
     uint64_t lock_off = 0;      ///< where the working-set lock starts (after the registered prefix)
     std::string note;
+    void* thp_base = nullptr;   // marvin-tuned: the THP mapping behind `arena`, when that path is taken
+    size_t thp_len = 0;
     auto release = [&]() {
         if (arena == nullptr) return;
+#if !defined(_WIN32)
+        if (thp_base != nullptr) {
+            (void) cudaHostUnregister(arena);
+            (void) munmap(thp_base, thp_len);
+            thp_base = nullptr;
+            arena = nullptr;
+            return;
+        }
+#endif
         if (pinned_ok) (void) cudaFreeHost(arena);
         else {
             if (partial_pin > 0) (void) cudaHostUnregister(arena);
@@ -1156,7 +1174,46 @@ bool FileExpertSource::pin_cache_complement(
         std::fprintf(stderr, "FileExpertSource: allocating %.2f GiB %s cache complement\n",
                      (double) bytes / 1073741824.0, pin ? "page-locked" : "pageable resident");
         std::fflush(stderr);
-        if (pin) {
+#if !defined(_WIN32)
+        // marvin-tuned: on Linux the copy is backed by transparent huge pages and then registered with CUDA, so the
+        // CPU pool's reads of the missed experts walk 2 MiB pages (cudaHostAlloc hands out 4 KiB ones: one TLB entry
+        // per 4 KiB of a ~2 MiB expert).  Opt-in, STRATA_COMPLEMENT_THP=1: on Marvin (2026-10-03, page cache full
+        // and fragmented, THP defrag defer+madvise) only 0.4-1.6 of 11.9 GiB came back as huge pages, so the default
+        // stays cudaHostAlloc.  A boot-time hugetlb pool would be the reliable way to get them.
+        static const bool thp_on = [] {
+            const char* v = std::getenv("STRATA_COMPLEMENT_THP");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        if (pin && thp_on) {
+            const size_t huge = 2ull << 20;
+            const size_t len = (((size_t) bytes + huge - 1) / huge) * huge + huge;
+            void* m = mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (m != MAP_FAILED) {
+                uint8_t* a = (uint8_t*) (((uintptr_t) m + huge - 1) & ~(uintptr_t) (huge - 1));
+                (void) madvise(a, len - (size_t) (a - (uint8_t*) m), MADV_HUGEPAGE);
+                // fault each 2 MiB page in with an ordinary write first, so the kernel hands out (and compacts for)
+                // huge pages; cudaHostRegister's own long-term pin faults them in as 4 KiB pages
+                for (size_t off = 0; off < (size_t) bytes; off += huge) ((volatile uint8_t*) a)[off] = 0;
+                void* alias = nullptr;
+                if (cudaHostRegister(a, (size_t) bytes, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
+                        cudaSuccess &&
+                    cudaHostGetDevicePointer(&alias, a, 0) == cudaSuccess && alias != nullptr) {
+                    arena = a;
+                    thp_base = m;
+                    thp_len = len;
+                    device = (const uint8_t*) alias;
+                    pinned_ok = true;
+                    note = "page-locked and mapped, transparent huge pages";
+                } else {
+                    (void) cudaGetLastError();
+                    (void) cudaHostUnregister(a);
+                    (void) cudaGetLastError();
+                    (void) munmap(m, len);
+                }
+            }
+        }
+#endif
+        if (pin && arena == nullptr) {
             const cudaError_t allocated = cudaHostAlloc(&arena, (size_t) bytes,
                                                          cudaHostAllocMapped | cudaHostAllocPortable);
             if (allocated == cudaSuccess) {
@@ -1330,6 +1387,8 @@ bool FileExpertSource::pin_cache_complement(
 #endif
 
     complement_arena_ = arena;
+    complement_thp_base_ = thp_base;
+    complement_thp_len_ = thp_len;
     complement_host_ = host;
     complement_device_ = device;
     complement_bytes_ = bytes;
