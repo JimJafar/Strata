@@ -45,13 +45,47 @@ if [ -n "${2:-}" ]; then
     CONFIG="$2"
 fi
 cd "$STRATA_DIR"
+# THE OTHER STRATA (2026-10-03). Strata-IQ3XXS and Strata-IQ3S need the same two cards,
+# and BOTH are persistent in llama-swap (a non-persistent IQ3S was evicted by every
+# dictation request: llama-swap applies the resident group's `exclusive` on each
+# request to a member). Persistent models are never evicted for each other, so the
+# launcher unloads the other one itself -- only once it is idle (no request running
+# or queued), up to STRATA_WAIT_S: llama-swap's unload API stops a model at once,
+# which killed requests mid-answer. STRATA_OTHER names it; the default (no engine
+# config argument = Strata-IQ3XXS's launch) is Strata-IQ3S.
+if [ -z "${STRATA_OTHER:-}" ] && [ -z "${2:-}" ]; then
+    STRATA_OTHER=Strata-IQ3S
+fi
+WAIT_S=${STRATA_WAIT_S:-480}
+if [ -n "${STRATA_OTHER:-}" ]; then
+    (
+        i=0
+        while [ "$i" -lt "$WAIT_S" ]; do
+            oport=$(curl -s -m 5 http://127.0.0.1:8033/running | python3 -c '
+import json, sys
+for m in json.load(sys.stdin).get("running", []):
+    if m["model"] == sys.argv[1]:
+        print(m["proxy"].rsplit(":", 1)[1])' "$STRATA_OTHER" 2>/dev/null || true)
+            [ -z "$oport" ] && exit 0                   # not loaded: nothing to unload
+            if curl -s -m 5 "http://127.0.0.1:$oport/metrics" | python3 -c '
+import json, sys
+live = json.load(sys.stdin)["live"]
+sys.exit(0 if live.get("state") == "idle" and not live.get("queued") else 1)' 2>/dev/null; then
+                curl -s -m 30 -X POST "http://127.0.0.1:8033/api/models/unload/$STRATA_OTHER" >/dev/null 2>&1
+                exit 0
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+    ) &
+fi
 # A llama-swap config reload stops the old Strata and starts this one at once, on
 # the same port: the old one is still freeing port and VRAM, so the new one exited
 # ("upstream command exited prematurely", 2026-10-01). Wait up to 60 s for it.
-# STRATA_WAIT_S (default 60) sets the limit; run-strata-qwen-iq3s.sh gives 480 s, since
-# the Strata-IQ3XXS it replaces may first finish a running request.
+# STRATA_WAIT_S (default 480, inside llama-swap's 600 s healthCheckTimeout) sets the
+# limit, since the other Strata may first finish a running request.
 i=0
-WAIT_TICKS=$(( ${STRATA_WAIT_S:-60} * 2 ))
+WAIT_TICKS=$(( WAIT_S * 2 ))
 while pgrep -f "serve/server.py --engine strata --config" >/dev/null \
         && [ "$i" -lt "$WAIT_TICKS" ]; do
     sleep 0.5
