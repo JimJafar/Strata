@@ -63,6 +63,25 @@ Things that did not help:
 
 Raw results and the harness are in `~/strata-ab` (`bench.py`, `sweep.py`, `results/`).
 
+## IQ3_S on the fork (`strata-iq3_s-marvin.json`)
+
+The bigger quant (setup calls it "matches the full model") fits with the fork:
+
+- `--resident-budget-gib 30` pins 27.8 GiB, and about 16 GiB of RAM stays available.
+- `--vram-reserve-mib 957`, which is what the engine asked for. Without it only 255 MiB of VRAM was free.
+- Shard 2, the PLE/engram table, is the same file (same SHA-256) for every GSQ-RCO size. Only shard 1 (54.8 GB) was downloaded; shard 2 is a symlink to the IQ3_XXS copy.
+
+Measured with the same harness (tok/s):
+
+| | IQ3_XXS fork | IQ3_S fork |
+|---|---|---|
+| 4K / 16K / 32K / 100K prompt | 1601 / 2625 / 3373 / 3795 | 1354 / 2399 / 3003 / 3326 |
+| decode: code / prose / explain | 115 / 90 / 101 | 99 / 80 / 91 |
+
+IQ3_S is about 10-15% slower than IQ3_XXS on the fork, and about level with official 0.1.37 on IQ3_XXS.
+
+llama-swap runs it as the `Strata-IQ3S` entry (`~/Strata/run-strata-qwen-iq3s.sh`). It cannot run beside Strata-IQ3XXS: both use the same two cards.
+
 ## Building
 
 ```sh
