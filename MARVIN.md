@@ -92,6 +92,14 @@ cmake --build build --target strata -j 14
 cp build/strata engine/strata.new && mv engine/strata.new engine/strata
 ```
 
+The launchers live in `marvin/` and are symlinked from `~/Strata`:
+
+- `run-strata-qwen.sh` takes an optional engine config as its 2nd argument and waits for any previous engine (`STRATA_WAIT_S`, default 60 s).
+- `run-strata-qwen-iq3s.sh` unloads Strata-IQ3XXS once it is idle, then starts IQ3_S.
+- `variant.env` is the production switch.
+
+The A/B harness, configs and raw results are in `marvin/ab`.
+
 `~/Strata/run-strata-qwen.sh` runs this fork when `~/Strata/variant.env` points at it. Delete `variant.env` to go back to the official checkout and its config.
 
 To rebase onto a new upstream:
