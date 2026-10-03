@@ -995,8 +995,27 @@ const uint8_t* FileExpertSource::mapped_blob(int64_t layer, int64_t expert) cons
 bool FileExpertSource::pin_cache_complement(
     const ExpertCache& cache, std::string& err, bool pin,
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
-    uint64_t headroom_bytes, uint64_t budget_bytes, const std::vector<std::pair<int32_t, int32_t>>* rank) {
+    uint64_t headroom_bytes, uint64_t budget_bytes, const std::vector<std::pair<int32_t, int32_t>>* rank,
+    const std::vector<std::pair<int32_t, int32_t>>* keep_in_ram) {
     err.clear();
+    // marvin-tuned: GPU-held experts the RAM copy holds as well (the prompt path's lend regions on a layer split:
+    // they are streamed during a prompt and refilled after it, by DMA from here instead of from the files)
+    std::vector<uint8_t> keep;
+    if (keep_in_ram != nullptr && !keep_in_ram->empty()) {
+        keep.assign((size_t) n_layers_ * (size_t) n_expert_, 0);
+        for (const auto& pr : *keep_in_ram)
+            if (pr.first >= 0 && pr.second >= 0 && pr.first < n_layers_ && pr.second < n_expert_)
+                keep[(size_t) pr.first * (size_t) n_expert_ + (size_t) pr.second] = 1;
+    }
+    auto kept = [&](int64_t layer, int64_t expert) {
+        return !keep.empty() && keep[(size_t) layer * (size_t) n_expert_ + (size_t) expert] != 0;
+    };
+    std::vector<std::pair<int32_t, int32_t>> others;
+    if (!keep.empty()) {
+        for (const auto& pr : additional_gpu_pairs)
+            if (!kept(pr.first, pr.second)) others.push_back(pr);
+    }
+    const std::vector<std::pair<int32_t, int32_t>>& gpu_others = keep.empty() ? additional_gpu_pairs : others;
     if (base_ == nullptr) { err = "FileExpertSource: open the mapped experts before pinning a complement"; return false; }
     if (complement_ready_) { err = "FileExpertSource: the cache complement is already pinned"; return false; }
     if (!cache.valid()) { err = "FileExpertSource: the GPU expert cache is not open"; return false; }
@@ -1021,7 +1040,7 @@ bool FileExpertSource::pin_cache_complement(
     for (int64_t layer = 0; layer < n_layers_; ++layer) {
         for (int64_t expert = 0; expert < n_expert_; ++expert) {
             const int32_t slot = cache.slot_of(layer, expert);
-            if (slot == kNotResident) continue;
+            if (slot == kNotResident || kept(layer, expert)) continue;
             primary_gpu_pairs.emplace_back((int32_t) layer, (int32_t) expert);
             pair_slot.push_back(slot);
             if (slot >= 0 && slot < n_slots) slot_bytes[(size_t) slot] = layer_blob_bytes_[(size_t) layer];
@@ -1030,7 +1049,7 @@ bool FileExpertSource::pin_cache_complement(
     std::vector<uint64_t> offsets;
     uint64_t bytes = 0;
     if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, primary_gpu_pairs,
-                                            additional_gpu_pairs, offsets, bytes, err)) return false;
+                                            gpu_others, offsets, bytes, err)) return false;
 #if defined(_WIN32)
     // #467: the GPU cache's pre-fill touched its experts through the mapping (~19 GiB on a 24 GB card), and Windows
     // counts those file pages in this process's working set, not as available: a 32 GB PC read 0.44 GiB here
@@ -1102,7 +1121,7 @@ bool FileExpertSource::pin_cache_complement(
         lend_from_slot = -1;
     }
 
-    const bool lend = lend_from_slot >= 0 && lend_from_slot < n_slots && additional_gpu_pairs.empty();
+    const bool lend = lend_from_slot >= 0 && lend_from_slot < n_slots && gpu_others.empty();
     uint64_t budget = std::numeric_limits<uint64_t>::max();
     if (bytes > 0 || lend) {
         // #403: with a budget, the reading it was sized from - a second reading a few MB lower (the engine's own
@@ -1137,7 +1156,7 @@ bool FileExpertSource::pin_cache_complement(
             for (size_t i = 0; i < primary_gpu_pairs.size(); ++i)
                 if (pair_slot[i] < keep_from) core.push_back(primary_gpu_pairs[i]);
             if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, core,
-                                                    additional_gpu_pairs, offsets, bytes, err)) return false;
+                                                    gpu_others, offsets, bytes, err)) return false;
         }
     }
 
@@ -1409,9 +1428,9 @@ bool FileExpertSource::pin_cache_complement(
                              "too%s\n", (long long) complement_lent_slots_, (long long) (n_slots - lend_from_slot),
                      complement_lent_slots_ < n_slots - lend_from_slot
                          ? " (the others are read from the file when lent: not enough RAM for them)" : "");
-    if (!additional_gpu_pairs.empty()) {
+    if (!gpu_others.empty()) {
         std::fprintf(stderr, "FileExpertSource: %zu verified additional-GPU experts remain on the mmap fallback\n",
-                     additional_gpu_pairs.size());
+                     gpu_others.size());
     }
     std::fflush(stderr);
     return true;

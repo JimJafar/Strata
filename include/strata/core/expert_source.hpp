@@ -429,7 +429,8 @@ public:
         const ExpertCache& cache, std::string& err, bool pin = true,
         const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {}, int64_t lend_from_slot = -1,
         uint64_t headroom_bytes = 8ull << 30, uint64_t budget_bytes = 0,
-        const std::vector<std::pair<int32_t, int32_t>>* rank = nullptr);
+        const std::vector<std::pair<int32_t, int32_t>>* rank = nullptr,
+        const std::vector<std::pair<int32_t, int32_t>>* keep_in_ram = nullptr);
     void close();
 
     bool mapped() const { return base_ != nullptr; }

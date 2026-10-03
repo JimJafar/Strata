@@ -3879,6 +3879,40 @@ int main(int argc, char** argv) {
         if (!stage_pairs.empty())
             std::fprintf(stderr, "strata generate: resident RAM mode across the split: %zu experts held by the later "
                                  "stages' caches are left out of the RAM copy\n", stage_pairs.size());
+        // marvin-tuned: on a split, each card's prompt-path loan (the top slots of its cache, sized for the chunk)
+        // keeps its experts in the RAM copy too, so a prompt streams and refills them by DMA instead of from the
+        // files.  STRATA_RESIDENT_LENT=0 turns it off.  The loan is decided again at serve setup; this is its size
+        // for the same chunk, so the two agree up to a few slots (a slot outside it only reads from the files).
+        std::vector<std::pair<int32_t, int32_t>> lent_pairs;
+        const char* lent_env = std::getenv("STRATA_RESIDENT_LENT");
+        if (!stage_pairs.empty() && (lent_env == nullptr || std::atoi(lent_env) != 0) && o.prefill_chunk > 0 &&
+            !o.no_prefill_borrow && d_res != nullptr && xcache.slots() > 0) {
+            int64_t chunk = o.prefill_chunk;
+            const int64_t k0 = plan_lend(chunk);
+            auto keep_top = [&](strata::core::ExpertCache& c, int64_t first, int64_t lb, int64_t le) {
+                for (int64_t l = lb; l < le; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e) {
+                        const int32_t sl = c.slot_of(l, e);
+                        if (sl != strata::core::kNotResident && sl >= first) lent_pairs.emplace_back((int32_t) l, (int32_t) e);
+                    }
+            };
+            if (k0 > 0) keep_top(xcache, xcache.slots() - k0, 0, split_at[0]);
+            for (const auto& st : stages) {
+                const uint64_t need = strata::prefill::Prefill::bytes_needed(g, st->ss, chunk);
+                strata::core::ExpertCache& c = st->cache;
+                int64_t first = c.slots();
+                while (first > 0) {
+                    const uint64_t have = c.slot_offsets()
+                        ? (uint64_t) (c.bytes() - (int64_t) c.slot_offsets()[first - 1])
+                        : (uint64_t) (c.slots() - (first - 1)) * (uint64_t) strata::kernels::cpu::expert_layout().max_blob;
+                    --first;
+                    if (have >= need) break;
+                }
+                keep_top(c, first, st->lb, st->le);
+            }
+            std::fprintf(stderr, "strata generate: resident RAM mode across the split: the prompt path's loans "
+                                 "(%lld-token chunk) keep %zu experts in RAM too\n", (long long) chunk, lent_pairs.size());
+        }
         int64_t lend_from = -1;
         if (stage_pairs.empty() && o.prefill_chunk > 0 && !o.no_prefill_borrow && d_res != nullptr && xcache.slots() > 0) {
             int64_t chunk = o.prefill_chunk;
@@ -3887,7 +3921,7 @@ int main(int argc, char** argv) {
         }
         bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, lend_from,
                                                     o.resident_headroom, o.resident_budget,
-                                                    multi_gpu ? &full_profile : &profile);
+                                                    multi_gpu ? &full_profile : &profile, &lent_pairs);
         std::string whole_err;
         if (!resident_ok && o.resident_soft) {
             // #467: the whole complement does not fit - keep what does, the hottest by the profile, through the #403
@@ -3896,7 +3930,7 @@ int main(int argc, char** argv) {
             whole_err = err;
             resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, -1, o.resident_headroom,
                                                    strata::core::FileExpertSource::kResidentWhatFits,
-                                                   multi_gpu ? &full_profile : &profile);
+                                                   multi_gpu ? &full_profile : &profile, &lent_pairs);
             if (resident_ok)
                 std::fprintf(stderr, "strata generate: WARNING: the whole resident RAM mode does not fit (%s); %.2f "
                                      "GiB of the experts the GPU does not hold, the hottest by the expert profile, are "

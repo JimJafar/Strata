@@ -1,0 +1,85 @@
+# marvin-tuned: Strata for Marvin
+
+This fork is tuned for one machine:
+
+- **CPU:** Intel Core Ultra 7 265KF (8 P-cores and 12 E-cores, AVX2 only, no AVX-512).
+- **RAM:** 64 GB, headless (no desktop running).
+- **OS:** Linux (CachyOS) with CUDA 13.4.
+- **GPUs:** an RTX 5070 Ti 16 GB (sm_120) and an RTX 3090 24 GB (sm_86), both on PCIe gen 4 x8, split by layer (`"gpu": [2, 1]`).
+- **Model:** Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS, 262K context, int8 KV with KV streaming.
+
+The fork is based on upstream 0.1.37.
+
+## The problem with upstream on this box
+
+On a two-GPU layer split, upstream gives you two choices:
+
+- **The arena** (no `--mmap-experts`). It pins every expert, about 44 GiB. It's fast, but it leaves the machine about 4 GiB of available RAM.
+- **`--mmap-experts`**. The experts come through the page cache. Because none of them are page-locked:
+  - the GPUs get no PCIe share of the expert misses, so the CPU computes every miss;
+  - the prompt path copies every streamed expert through host threads.
+
+  Upstream's middle ground, the pinned "resident" RAM tier (`--resident-budget-gib` / `--resident-experts`), is refused with a layer split.
+
+## What the fork changes
+
+All changes are in `src/program/generate.cpp` and `src/core/expert_source.cpp`.
+
+1. **The resident tier works across a layer split.** The pinned RAM copy holds exactly the experts that no card's cache holds. The pairs held by later stages are passed in as `additional_gpu_pairs`.
+2. **The tier is ranked by the whole expert profile.** On a split, `profile` is cut down to CUDA0's share. Upstream's ranking therefore left every layer on the 3090 out of the budget.
+3. **Adaptive swaps read from the right card.** `resident_stage_swaps` copies each evicted slot back from that layer's own stage, using that stage's device and stream. Upstream always read from the first card's cache, which on a split would put the wrong card's bytes into the RAM copy.
+4. **Each card's prompt loan stays in RAM.** These are the top cache slots each card lends to the prompt path's buffers. Their experts are now also kept in the pinned copy, so a prompt streams and refills them by DMA. Upstream's single-GPU resident mode already does this. Set `STRATA_RESIDENT_LENT=0` to turn it off.
+5. **Opt-in, `STRATA_COMPLEMENT_THP=1`:** back the copy with transparent huge pages. On this box only 0.4–1.6 GiB of the 12 GiB came back as huge pages, because the page cache keeps RAM fragmented. That's why it's off by default.
+
+## The settings that matter (`strata-iq3_xxs-marvin.json`)
+
+- `--mmap-experts --resident-budget-gib 22`: about 19.8 GiB pinned (the uncached experts plus both cards' prompt loans). About 25 GiB of RAM stays available.
+- `--pool-workers 8` instead of upstream's default of every core but one (19 here). Measured: 8 to 14 workers perform the same once the misses are pinned, and 19 was 5–9% slower.
+- Unchanged, because the sweeps below confirmed them: `--spec 4 --spec-min-p 0.5`, the probed `--pcie-frac`, and an 8K prompt chunk.
+
+## Measured (2026-10-03, through llama-swap)
+
+Method:
+
+- Unique nonce on every prompt, temperature 0, 2 reps, medians.
+- Prompt figures are tok/s reading the prompt. Decode figures are tok/s for 1024 generated tokens.
+- `agent` is a 17K-token prompt followed by 700 generated tokens.
+
+| | official 0.1.37 (mmap) | official, arena | **marvin-tuned** |
+|---|---|---|---|
+| 1K / 4K prompt | 300 / 960 | 547 / 1583 | **645 / 1601** |
+| 16K / 32K prompt | 1822 / 2169 | 2165 / 3018 | **2625 / 3373** |
+| 100K prompt | 2389 | **4117** | 3795 |
+| decode: code / prose / explain | 97 / 75 / 87 | 118 / 90 / 102 | 115 / 90 / 101 |
+| agent: prompt / decode | 1701 / 88 | 2027 / 97 | **2546 / 98** |
+| RAM available | ~45 GiB | ~4 GiB | ~25 GiB |
+
+Things that did not help:
+
+- `--spec 5` or `6`, and `--spec-min-p 0.3` or `0.7`: equal or worse.
+- `--pcie-frac 0.55` instead of the probed 0.35–0.37: worse.
+- A 16K prompt chunk with the resident tier: 16K, 32K and agent prompts were about 20% slower (100K was 3% faster).
+- A VRAM reserve of 350 MiB instead of 700: the verify buffers no longer fit, so the engine failed to start.
+
+Raw results and the harness are in `~/strata-ab` (`bench.py`, `sweep.py`, `results/`).
+
+## Building
+
+```sh
+cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
+  "-DCMAKE_CUDA_ARCHITECTURES=86;120" -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc \
+  -DSTRATA_GGML_DIR=/home/jim/Strata/third_party/llama.cpp
+cmake --build build --target strata -j 14
+cp build/strata engine/strata.new && mv engine/strata.new engine/strata
+```
+
+`~/Strata/run-strata-qwen.sh` runs this fork when `~/Strata/variant.env` points at it. Delete `variant.env` to go back to the official checkout and its config.
+
+To rebase onto a new upstream:
+
+```sh
+git -C ~/Strata fetch --tags
+git rebase <tag>
+```
+
+Then rebuild, and re-run the A/B before trusting the numbers.
