@@ -31,7 +31,9 @@
   "--pool-workers",
   "8",
   "--vram-reserve-mib",
-  "957"
+  "957",
+  "--pipeline-windows",
+  "2"
  ],
  "cwd": "/home/jim/Strata",
  "tokenizer": "/home/jim/Strata-data/packs/iq3_s/tokenizer",

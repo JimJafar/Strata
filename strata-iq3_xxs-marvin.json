@@ -29,7 +29,9 @@
   "--resident-budget-gib",
   "22",
   "--pool-workers",
-  "8"
+  "8",
+  "--pipeline-windows",
+  "2"
  ],
  "cwd": "/home/jim/Strata",
  "tokenizer": "/home/jim/Strata-data/packs/iq3_xxs/tokenizer",

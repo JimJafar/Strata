@@ -99,6 +99,24 @@ IQ3_S is about 10-15% slower than IQ3_XXS on the fork, and about level with offi
 
 llama-swap runs it as the `Strata-IQ3S` entry (`~/Strata/run-strata-qwen-iq3s.sh`). It cannot run beside Strata-IQ3XXS: both use the same two cards.
 
+## Pipelined windows on, parallel slots off (2026-10-06, IQ3_S, fork on 0.1.40)
+
+Both configs run `--pipeline-windows 2`: the 5070 Ti starts the next verify window while the 3090 still finishes this one, on the guess that the drafts are accepted. Measured one request at a time (tok/s, medians of 2):
+
+| | without | `--pipeline-windows 2` | `"parallel": 2` |
+|---|---|---|---|
+| code decode | 108 | **135 (+25%)** | 104 |
+| prose decode | 102 | 103 | 98 |
+| 30K prompt | 2874 | 2800 | 2772 |
+
+`--pipeline-windows 2` keeps 278 MiB of the 5070 Ti out of the expert cache. Code gains most because its drafts are guessed right more often.
+
+Parallel slots (`"parallel": 2 --batch-groups 2`) were measured and left off:
+
+- Each slot takes about 0.5 GiB on each card from the expert cache, which costs about 4% on every request.
+- Two requests sent together finished at 23.8 s and 23.4 s, with 86 tok/s combined. Queued one after the other, they finished at 10.2 s and 20.7 s, with 97 tok/s combined. The cause is that slots on a split decode without MTP drafts.
+- The two options can't be combined anyway.
+
 ## Building
 
 ```sh
