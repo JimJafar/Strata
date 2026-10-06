@@ -117,6 +117,10 @@ Parallel slots (`"parallel": 2 --batch-groups 2`) were measured and left off:
 - Two requests sent together finished at 23.8 s and 23.4 s, with 86 tok/s combined. Queued one after the other, they finished at 10.2 s and 20.7 s, with 97 tok/s combined. The cause is that slots on a split decode without MTP drafts.
 - The two options can't be combined anyway.
 
+## Remote access: `allowed_hosts`
+
+From 0.1.40 the server rejects any request whose Host header is not a name it knows (DNS-rebinding protection, 403 "Host ... is not allowed"). llama-swap passes on the client's Host, so every request over the tailnet (`marvin.akita-betelgeuse.ts.net:8033`) was refused until both configs got `"allowed_hosts": [".akita-betelgeuse.ts.net", "marvin"]`. Keep it in any new config.
+
 ## Building
 
 ```sh
